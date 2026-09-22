@@ -1,0 +1,13 @@
+services:
+  docker-controller:
+    build: .
+    container_name: docker-control-bot
+    restart: unless-stopped
+
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_USER_ID: ${TELEGRAM_USER_ID}
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /home/ubuntu/telegram-torrent-bot:/home/ubuntu/telegram-torrent-bot
