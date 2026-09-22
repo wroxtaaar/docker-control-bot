@@ -1,16 +1,43 @@
 import os
-import subprocess
-from telegram import Update
+import docker
+from html import escape
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    BotCommand,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
+    CallbackQueryHandler,
     ContextTypes,
 )
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED_USER_ID = int(os.environ["TELEGRAM_USER_ID"])
 
-PROJECT_DIR = os.path.expanduser("~/telegram-torrent-bot")
+# ============================================================
+# MANAGED SERVICES
+# ============================================================
+
+SERVICES = {
+    "torrent": {
+        "name": "🎬 Torrent Bot",
+        "containers": [
+            "torrent-qbittorrent",
+            "telegram-torrent-bot",
+        ],
+        "log_container": "telegram-torrent-bot",
+    },
+}
+
+# ============================================================
+# DOCKER
+# ============================================================
+
+docker_client = docker.from_env()
 
 
 def authorized(update: Update) -> bool:
@@ -18,162 +45,586 @@ def authorized(update: Update) -> bool:
     return user is not None and user.id == ALLOWED_USER_ID
 
 
-def docker_command(command):
-    result = subprocess.run(
-        command,
-        cwd=PROJECT_DIR,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-
-    output = (result.stdout + result.stderr).strip()
-
-    if not output:
-        output = "Command completed."
-
-    return output
+def get_container(name):
+    return docker_client.containers.get(name)
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorized(update):
-        return
-
-    await update.message.reply_text(
-        "🐳 Docker Controller\n\n"
-        "/status - Docker status\n"
-        "/containers - List containers\n"
-        "/up - Start torrent services\n"
-        "/down - Stop torrent services\n"
-        "/restart - Restart torrent services\n"
-        "/logs - Show recent bot logs"
-    )
+def container_status(name):
+    try:
+        container = get_container(name)
+        container.reload()
+        return container.status
+    except Exception:
+        return "not found"
 
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorized(update):
-        return
+def service_status(service_key):
+    service = SERVICES[service_key]
 
-    output = docker_command([
-        "docker",
-        "compose",
-        "ps",
+    statuses = [
+        container_status(name)
+        for name in service["containers"]
+    ]
+
+    running = statuses.count("running")
+
+    if running == len(statuses):
+        return "🟢 Running"
+
+    if running == 0:
+        return "⚫ Stopped"
+
+    return "🟡 Partially Running"
+
+
+def start_service(service_key):
+    service = SERVICES[service_key]
+
+    results = []
+
+    for name in service["containers"]:
+        try:
+            container = get_container(name)
+            container.reload()
+
+            if container.status != "running":
+                container.start()
+                results.append(f"✅ {name} started")
+            else:
+                results.append(f"🟢 {name} already running")
+
+        except Exception as error:
+            results.append(
+                f"❌ {name}: {error}"
+            )
+
+    return results
+
+
+def stop_service(service_key):
+    service = SERVICES[service_key]
+
+    results = []
+
+    for name in service["containers"]:
+        try:
+            container = get_container(name)
+            container.reload()
+
+            if container.status == "running":
+                container.stop(timeout=10)
+                results.append(f"🛑 {name} stopped")
+            else:
+                results.append(f"⚫ {name} already stopped")
+
+        except Exception as error:
+            results.append(
+                f"❌ {name}: {error}"
+            )
+
+    return results
+
+
+def restart_service(service_key):
+    service = SERVICES[service_key]
+
+    results = []
+
+    for name in service["containers"]:
+        try:
+            container = get_container(name)
+            container.restart(timeout=10)
+            results.append(f"🔄 {name} restarted")
+
+        except Exception as error:
+            results.append(
+                f"❌ {name}: {error}"
+            )
+
+    return results
+
+
+def get_logs(service_key):
+    service = SERVICES[service_key]
+    name = service["log_container"]
+
+    try:
+        container = get_container(name)
+
+        logs = container.logs(
+            tail=40,
+            timestamps=True,
+        ).decode(
+            "utf-8",
+            errors="replace",
+        )
+
+        return logs or "No logs available."
+
+    except Exception as error:
+        return f"Error: {error}"
+
+
+# ============================================================
+# KEYBOARDS
+# ============================================================
+
+def main_keyboard():
+    buttons = []
+
+    for key, service in SERVICES.items():
+        buttons.append([
+            InlineKeyboardButton(
+                service["name"],
+                callback_data=f"service:{key}",
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            "📊 All Status",
+            callback_data="all_status",
+        ),
+        InlineKeyboardButton(
+            "🐳 Containers",
+            callback_data="containers",
+        ),
     ])
 
-    await update.message.reply_text(
-        f"🐳 Docker Status\n\n```text\n{output[:3500]}\n```",
-        parse_mode="Markdown",
+    return InlineKeyboardMarkup(buttons)
+
+
+def service_keyboard(service_key):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "▶️ START",
+                callback_data=f"start:{service_key}",
+            ),
+            InlineKeyboardButton(
+                "⏹️ STOP",
+                callback_data=f"stop:{service_key}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🔄 RESTART",
+                callback_data=f"restart:{service_key}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📊 STATUS",
+                callback_data=f"status:{service_key}",
+            ),
+            InlineKeyboardButton(
+                "📋 LOGS",
+                callback_data=f"logs:{service_key}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "⬅️ BACK",
+                callback_data="home",
+            ),
+        ],
+    ])
+
+
+# ============================================================
+# TEXT
+# ============================================================
+
+def home_text():
+    return (
+        "🐳 <b>Docker Controller</b>\n\n"
+        "Select a bot or service to manage."
     )
 
 
-async def containers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def service_text(service_key):
+    service = SERVICES[service_key]
+
+    lines = [
+        f"<b>{escape(service['name'])}</b>",
+        "",
+        f"Status: {service_status(service_key)}",
+        "",
+    ]
+
+    for name in service["containers"]:
+        status = container_status(name)
+
+        if status == "running":
+            icon = "🟢"
+        elif status == "exited":
+            icon = "⚫"
+        else:
+            icon = "🟡"
+
+        lines.append(
+            f"{icon} {escape(name)} — {status}"
+        )
+
+    lines.append("")
+    lines.append("Choose an action:")
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# COMMANDS
+# ============================================================
+
+async def start_command(update, context):
     if not authorized(update):
         return
 
-    output = docker_command([
-        "docker",
-        "ps",
-        "--format",
-        "table {{.Names}}\t{{.Status}}\t{{.Ports}}",
-    ])
-
     await update.message.reply_text(
-        f"📦 Containers\n\n```text\n{output[:3500]}\n```",
-        parse_mode="Markdown",
+        home_text(),
+        parse_mode="HTML",
+        reply_markup=main_keyboard(),
     )
 
 
-async def up(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def status_command(update, context):
     if not authorized(update):
         return
 
-    await update.message.reply_text("🚀 Starting torrent services...")
+    lines = [
+        "📊 <b>Docker Services</b>",
+        "",
+    ]
 
-    output = docker_command([
-        "docker",
-        "compose",
-        "up",
-        "-d",
-        "qbittorrent",
-        "bot",
-    ])
+    for key, service in SERVICES.items():
+        lines.append(
+            f"{escape(service['name'])}: "
+            f"{service_status(key)}"
+        )
 
     await update.message.reply_text(
-        f"✅ Services started.\n\n```text\n{output[:3000]}\n```",
-        parse_mode="Markdown",
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=main_keyboard(),
     )
 
 
-async def down(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ============================================================
+# CALLBACKS
+# ============================================================
+
+async def callback_handler(update, context):
+    query = update.callback_query
+
     if not authorized(update):
+        await query.answer(
+            "Unauthorized",
+            show_alert=True,
+        )
         return
 
-    await update.message.reply_text("🛑 Stopping torrent services...")
+    await query.answer()
 
-    output = docker_command([
-        "docker",
-        "compose",
-        "stop",
-        "qbittorrent",
-        "bot",
-    ])
+    data = query.data
 
-    await update.message.reply_text(
-        f"✅ Services stopped.\n\n```text\n{output[:3000]}\n```",
-        parse_mode="Markdown",
-    )
-
-
-async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorized(update):
+    # HOME
+    if data == "home":
+        await query.edit_message_text(
+            home_text(),
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
         return
 
-    await update.message.reply_text("🔄 Restarting torrent services...")
+    # SERVICE
+    if data.startswith("service:"):
+        service_key = data.split(":", 1)[1]
 
-    output = docker_command([
-        "docker",
-        "compose",
-        "restart",
-        "qbittorrent",
-        "bot",
-    ])
+        if service_key not in SERVICES:
+            return
 
-    await update.message.reply_text(
-        f"✅ Services restarted.\n\n```text\n{output[:3000]}\n```",
-        parse_mode="Markdown",
-    )
-
-
-async def logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorized(update):
+        await query.edit_message_text(
+            service_text(service_key),
+            parse_mode="HTML",
+            reply_markup=service_keyboard(service_key),
+        )
         return
 
-    output = docker_command([
-        "docker",
-        "compose",
-        "logs",
-        "--tail=40",
-        "bot",
+    # ALL STATUS
+    if data == "all_status":
+        lines = [
+            "📊 <b>All Services</b>",
+            "",
+        ]
+
+        for key, service in SERVICES.items():
+            lines.append(
+                f"{escape(service['name'])}: "
+                f"{service_status(key)}"
+            )
+
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔄 Refresh",
+                        callback_data="all_status",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅️ BACK",
+                        callback_data="home",
+                    )
+                ],
+            ]),
+        )
+        return
+
+    # CONTAINERS
+    if data == "containers":
+        try:
+            containers = docker_client.containers.list(
+                all=True
+            )
+
+            lines = [
+                "🐳 <b>Docker Containers</b>",
+                "",
+            ]
+
+            for container in containers:
+                status = container.status
+
+                if status == "running":
+                    icon = "🟢"
+                elif status == "exited":
+                    icon = "⚫"
+                else:
+                    icon = "🟡"
+
+                lines.append(
+                    f"{icon} "
+                    f"<code>{escape(container.name)}</code>"
+                    f" — {escape(status)}"
+                )
+
+            if not containers:
+                lines.append(
+                    "No containers found."
+                )
+
+            text = "\n".join(lines)
+
+        except Exception as error:
+            text = (
+                "❌ <b>Docker Error</b>\n\n"
+                f"<pre>{escape(str(error))}</pre>"
+            )
+
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔄 Refresh",
+                        callback_data="containers",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅️ BACK",
+                        callback_data="home",
+                    )
+                ],
+            ]),
+        )
+        return
+
+    # ACTION
+    if ":" not in data:
+        return
+
+    action, service_key = data.split(":", 1)
+
+    if service_key not in SERVICES:
+        return
+
+    service = SERVICES[service_key]
+
+    # STATUS
+    if action == "status":
+        await query.edit_message_text(
+            service_text(service_key),
+            parse_mode="HTML",
+            reply_markup=service_keyboard(service_key),
+        )
+        return
+
+    # START
+    if action == "start":
+        await query.edit_message_text(
+            f"🚀 Starting "
+            f"<b>{escape(service['name'])}</b>...",
+            parse_mode="HTML",
+        )
+
+        results = start_service(service_key)
+
+        text = (
+            f"🚀 <b>{escape(service['name'])}</b>\n\n"
+            + "\n".join(
+                escape(x) for x in results
+            )
+            + "\n\n"
+            + f"Status: {service_status(service_key)}"
+        )
+
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=service_keyboard(service_key),
+        )
+        return
+
+    # STOP
+    if action == "stop":
+        await query.edit_message_text(
+            f"⏹️ Stopping "
+            f"<b>{escape(service['name'])}</b>...",
+            parse_mode="HTML",
+        )
+
+        results = stop_service(service_key)
+
+        text = (
+            f"⏹️ <b>{escape(service['name'])}</b>\n\n"
+            + "\n".join(
+                escape(x) for x in results
+            )
+            + "\n\n"
+            + f"Status: {service_status(service_key)}"
+        )
+
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=service_keyboard(service_key),
+        )
+        return
+
+    # RESTART
+    if action == "restart":
+        await query.edit_message_text(
+            f"🔄 Restarting "
+            f"<b>{escape(service['name'])}</b>...",
+            parse_mode="HTML",
+        )
+
+        results = restart_service(service_key)
+
+        text = (
+            f"🔄 <b>{escape(service['name'])}</b>\n\n"
+            + "\n".join(
+                escape(x) for x in results
+            )
+            + "\n\n"
+            + f"Status: {service_status(service_key)}"
+        )
+
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=service_keyboard(service_key),
+        )
+        return
+
+    # LOGS
+    if action == "logs":
+        logs = get_logs(service_key)
+
+        text = (
+            f"📋 <b>{escape(service['name'])} "
+            f"Logs</b>\n\n"
+            f"<pre>{escape(logs[-3500:])}</pre>"
+        )
+
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔄 Refresh",
+                        callback_data=f"logs:{service_key}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅️ BACK",
+                        callback_data=f"service:{service_key}",
+                    )
+                ],
+            ]),
+        )
+        return
+
+
+# ============================================================
+# STARTUP
+# ============================================================
+
+async def post_init(application):
+    await application.bot.set_my_commands([
+        BotCommand(
+            "start",
+            "Open Docker controller",
+        ),
+        BotCommand(
+            "status",
+            "Show Docker services",
+        ),
     ])
 
-    await update.message.reply_text(
-        f"📋 Torrent Bot Logs\n\n```text\n{output[-3500:]}\n```",
-        parse_mode="Markdown",
-    )
+    print("✅ Telegram command menu configured.")
 
 
 def main():
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Test Docker connection immediately.
+    docker_client.ping()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("status", status))
-    application.add_handler(CommandHandler("containers", containers))
-    application.add_handler(CommandHandler("up", up))
-    application.add_handler(CommandHandler("down", down))
-    application.add_handler(CommandHandler("restart", restart))
-    application.add_handler(CommandHandler("logs", logs))
-
+    print("🐳 Docker connection successful.")
     print("🐳 Docker Controller Bot is running...")
+
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "start",
+            start_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "status",
+            status_command,
+        )
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            callback_handler,
+        )
+    )
 
     application.run_polling()
 
