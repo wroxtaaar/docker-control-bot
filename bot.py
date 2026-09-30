@@ -2,6 +2,7 @@ import os
 import shlex
 import textwrap
 import time
+import threading
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -153,6 +154,15 @@ def _bandwidth_snapshot() -> dict:
         "usage_pct": usage_pct,
         "month": month,
     }
+
+
+def bandwidth_sampler() -> None:
+    while True:
+        try:
+            _bandwidth_snapshot()
+        except Exception:
+            pass
+        time.sleep(60)
 
 
 def bandwidth_text() -> str:
@@ -1125,6 +1135,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     docker_client.ping()
+    threading.Thread(target=bandwidth_sampler, name="bandwidth-sampler", daemon=True).start()
     print("🐳 Docker connection successful.")
     print("🐳 Docker Controller Bot is running...")
 
