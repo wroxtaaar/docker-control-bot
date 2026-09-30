@@ -38,3 +38,5 @@ jobs:
 
       - name: Validate Compose configuration
         run: docker compose config
+
+# CI workflow for the Docker controller
