@@ -222,7 +222,7 @@ def vps_stats_text() -> str:
             f"⬆️ TX: <b>{format_bytes(bandwidth['tx'])}</b> ({format_rate(bandwidth['tx_rate'])})\n"
             f"📊 Month outbound: <b>{format_bytes(bandwidth['monthly'])}</b>\n"
             + (f"📦 Remaining: <b>{format_bytes(bandwidth['remaining'])}</b> ({bandwidth['usage_pct']:.1f}% used)\n" if bandwidth["allowance"] else "")
-            +             f"⏱️ Uptime: {format_uptime(time.time() - psutil.boot_time())}\n\n"
+            + f"⏱️ Uptime: {format_uptime(time.time() - psutil.boot_time())}\n\n"
             f"🐳 Docker: <b>{running} running</b> / {len(containers)} total"
         )
     except Exception as error:
