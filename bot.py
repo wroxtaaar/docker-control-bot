@@ -1,7 +1,9 @@
 import os
 import shlex
 import textwrap
+import time
 import docker
+import psutil
 from html import escape
 
 from telegram import (
@@ -49,6 +51,103 @@ SERVICES = {
         "log_container": "terabox-vps-worker",
     },
 }
+
+# ============================================================
+# VPS STATS
+# ============================================================
+
+def format_bytes(value: int | float) -> str:
+    value = float(value or 0)
+    if value < 1024:
+        return f"{value:.0f} B"
+    for unit in ("KB", "MB", "GB", "TB"):
+        value /= 1024
+        if value < 1024 or unit == "TB":
+            return f"{value:.1f} {unit}"
+    return "0 B"
+
+
+def format_uptime(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, _ = divmod(seconds, 60)
+    if days:
+        return f"{days}d {hours}h {minutes}m"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def vps_stats_text() -> str:
+    try:
+        cpu = psutil.cpu_percent(interval=0.35)
+        cores = psutil.cpu_count() or 1
+        load = psutil.getloadavg() if hasattr(psutil, "getloadavg") else (0, 0, 0)
+        memory = psutil.virtual_memory()
+        swap = psutil.swap_memory()
+        disk = psutil.disk_usage("/")
+        net = psutil.net_io_counters()
+        containers = docker_client.containers.list(all=True)
+        running = sum(c.status == "running" for c in containers)
+
+        mem_icon = "🔴" if memory.percent >= 90 else "🟡" if memory.percent >= 75 else "🟢"
+        disk_icon = "🔴" if disk.percent >= 90 else "🟡" if disk.percent >= 75 else "🟢"
+
+        return (
+            "🖥️ <b>VPS Statistics</b>\n\n"
+            f"⚙️ CPU: <b>{cpu:.1f}%</b> ({cores} cores)\n"
+            f"📈 Load: <code>{load[0]:.2f} / {load[1]:.2f} / {load[2]:.2f}</code>\n"
+            f"{mem_icon} RAM: <b>{format_bytes(memory.used)}</b> / {format_bytes(memory.total)} ({memory.percent:.1f}%)\n"
+            f"💾 Swap: <b>{format_bytes(swap.used)}</b> / {format_bytes(swap.total)} ({swap.percent:.1f}%)\n"
+            f"{disk_icon} Disk: <b>{format_bytes(disk.used)}</b> / {format_bytes(disk.total)} ({disk.percent:.1f}%)\n"
+            f"⬇️ Network RX: {format_bytes(net.bytes_recv)}\n"
+            f"⬆️ Network TX: {format_bytes(net.bytes_sent)}\n"
+            f"⏱️ Uptime: {format_uptime(time.time() - psutil.boot_time())}\n\n"
+            f"🐳 Docker: <b>{running} running</b> / {len(containers)} total"
+        )
+    except Exception as error:
+        return f"❌ Could not read VPS statistics: <pre>{escape(str(error))}</pre>"
+
+
+def container_stats_text() -> str:
+    lines = ["🐳 <b>Docker Resource Usage</b>", ""]
+    containers = sorted(docker_client.containers.list(all=True), key=lambda c: c.name.lower())
+
+    for container in containers:
+        if container.status != "running":
+            lines.append(f"⚫ <code>{escape(container.name)}</code> — stopped")
+            continue
+        try:
+            stats = container.stats(stream=False)
+            memory = stats.get("memory_stats", {})
+            usage = int(memory.get("usage") or 0)
+            limit = int(memory.get("limit") or 0)
+            mem_pct = usage * 100 / limit if limit else 0
+
+            cpu_stats = stats.get("cpu_stats", {})
+            prev = stats.get("precpu_stats", {})
+            cpu_delta = (
+                (cpu_stats.get("cpu_usage", {}).get("total_usage") or 0)
+                - (prev.get("cpu_usage", {}).get("total_usage") or 0)
+            )
+            system_delta = (
+                (cpu_stats.get("system_cpu_usage") or 0)
+                - (prev.get("system_cpu_usage") or 0)
+            )
+            online = cpu_stats.get("online_cpus") or psutil.cpu_count() or 1
+            cpu_pct = cpu_delta / system_delta * online * 100 if system_delta > 0 else 0
+
+            limit_text = f" / {format_bytes(limit)} ({mem_pct:.1f}%)" if limit else ""
+            lines.append(
+                f"🟢 <code>{escape(container.name)}</code> — "
+                f"CPU {cpu_pct:.1f}% | RAM {format_bytes(usage)}{limit_text}"
+            )
+        except Exception:
+            lines.append(f"🟡 <code>{escape(container.name)}</code> — stats unavailable")
+
+    return "\n".join(lines)
+
 
 # ============================================================
 # DOCKER
@@ -356,8 +455,12 @@ def main_keyboard():
     ]
 
     buttons.append([
-        InlineKeyboardButton("📊 All Status", callback_data="all_status"),
+        InlineKeyboardButton("🖥️ VPS Stats", callback_data="vps_stats"),
         InlineKeyboardButton("🐳 Containers", callback_data="containers"),
+    ])
+    buttons.append([
+        InlineKeyboardButton("📈 Docker Stats", callback_data="docker_stats"),
+        InlineKeyboardButton("📊 All Status", callback_data="all_status"),
     ])
     buttons.append([
         InlineKeyboardButton("➕ Add Container", callback_data="add_container_help"),
@@ -436,6 +539,9 @@ def service_text(service_key: str):
 def help_text():
     return (
         "🐳 <b>Docker Controller Help</b>\n\n"
+        "<b>VPS monitoring</b>\n"
+        "/stats — CPU, RAM, swap, disk, network and uptime\n"
+        "/docker_stats — per-container CPU and RAM usage\n\n"
         "<b>Services</b>\n"
         "/start — open controller\n"
         "/status — show services\n"
@@ -490,6 +596,34 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\n".join(lines),
         parse_mode="HTML",
         reply_markup=main_keyboard(),
+    )
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update):
+        return
+    await update.message.reply_text(
+        vps_stats_text(),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Refresh", callback_data="vps_stats")],
+            [InlineKeyboardButton("📈 Docker Stats", callback_data="docker_stats")],
+            [InlineKeyboardButton("⬅️ BACK", callback_data="home")],
+        ]),
+    )
+
+
+async def docker_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update):
+        return
+    await update.message.reply_text(
+        container_stats_text(),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Refresh", callback_data="docker_stats")],
+            [InlineKeyboardButton("🖥️ VPS Stats", callback_data="vps_stats")],
+            [InlineKeyboardButton("⬅️ BACK", callback_data="home")],
+        ]),
     )
 
 
@@ -593,6 +727,8 @@ async def container_create_command(update: Update, context: ContextTypes.DEFAULT
 async def post_init(application: Application):
     await application.bot.set_my_commands([
         BotCommand("start", "Open Docker controller"),
+        BotCommand("stats", "Show VPS CPU, RAM and disk"),
+        BotCommand("docker_stats", "Show container CPU and RAM"),
         BotCommand("status", "Show Docker services"),
         BotCommand("containers", "List all Docker containers"),
         BotCommand("container", "Open one container"),
@@ -638,6 +774,30 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬅️ BACK", callback_data="home")]
+            ]),
+        )
+        return
+
+    if data == "vps_stats":
+        await query.edit_message_text(
+            vps_stats_text(),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Refresh", callback_data="vps_stats")],
+                [InlineKeyboardButton("📈 Docker Stats", callback_data="docker_stats")],
+                [InlineKeyboardButton("⬅️ BACK", callback_data="home")],
+            ]),
+        )
+        return
+
+    if data == "docker_stats":
+        await query.edit_message_text(
+            container_stats_text(),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Refresh", callback_data="docker_stats")],
+                [InlineKeyboardButton("🖥️ VPS Stats", callback_data="vps_stats")],
+                [InlineKeyboardButton("⬅️ BACK", callback_data="home")],
             ]),
         )
         return
@@ -836,6 +996,8 @@ def main():
     )
 
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("docker_stats", docker_stats_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("containers", containers_command))
