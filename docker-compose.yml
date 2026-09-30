@@ -7,7 +7,8 @@ services:
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_USER_ID: ${TELEGRAM_USER_ID}
+      TERABOX_COMPOSE_FILE: /home/ubuntu/terabox-telegram-bot/vps/docker-compose.yml
 
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /home/ubuntu/telegram-torrent-bot:/home/ubuntu/telegram-torrent-bot
+      - /home/ubuntu/terabox-telegram-bot:/home/ubuntu/terabox-telegram-bot
