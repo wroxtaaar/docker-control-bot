@@ -2,6 +2,9 @@ import os
 import shlex
 import textwrap
 import time
+import json
+from datetime import datetime, timezone
+from pathlib import Path
 import docker
 import psutil
 from html import escape
@@ -27,6 +30,9 @@ TERABOX_COMPOSE = os.getenv(
     "TERABOX_COMPOSE_FILE",
     "/home/ubuntu/terabox-telegram-bot/vps/docker-compose.yml",
 )
+
+VPS_BANDWIDTH_GB = float(os.getenv("VPS_BANDWIDTH_GB", "0") or 0)
+BANDWIDTH_STATE_FILE = Path(os.getenv("BANDWIDTH_STATE_FILE", "/data/bandwidth_state.json"))
 
 docker_client = docker.from_env()
 
@@ -79,6 +85,106 @@ def format_uptime(seconds: float) -> str:
     return f"{minutes}m"
 
 
+def format_rate(bytes_per_second: float) -> str:
+    return f"{format_bytes(bytes_per_second)}/s"
+
+
+def _load_bandwidth_state() -> dict:
+    try:
+        if BANDWIDTH_STATE_FILE.exists():
+            with BANDWIDTH_STATE_FILE.open("r", encoding="utf-8") as file:
+                state = json.load(file)
+                if isinstance(state, dict):
+                    return state
+    except Exception:
+        pass
+    return {}
+
+
+def _save_bandwidth_state(state: dict) -> None:
+    try:
+        BANDWIDTH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temp_file = BANDWIDTH_STATE_FILE.with_suffix(".tmp")
+        with temp_file.open("w", encoding="utf-8") as file:
+            json.dump(state, file)
+        temp_file.replace(BANDWIDTH_STATE_FILE)
+    except Exception:
+        pass
+
+
+def _bandwidth_snapshot() -> dict:
+    now = time.time()
+    net = psutil.net_io_counters()
+    rx, tx = int(net.bytes_recv), int(net.bytes_sent)
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    state = _load_bandwidth_state()
+
+    if state.get("month") != month:
+        monthly = 0
+        previous_rx, previous_tx, previous_time = rx, tx, now
+    else:
+        previous_rx = int(state.get("last_rx") or rx)
+        previous_tx = int(state.get("last_tx") or tx)
+        previous_time = float(state.get("last_time") or now)
+        monthly = int(state.get("monthly_bytes") or 0)
+        monthly += max(0, rx - previous_rx) + max(0, tx - previous_tx)
+
+    _save_bandwidth_state({
+        "month": month,
+        "monthly_bytes": monthly,
+        "last_rx": rx,
+        "last_tx": tx,
+        "last_time": now,
+    })
+
+    elapsed = max(0.1, now - previous_time)
+    allowance = VPS_BANDWIDTH_GB * 1024 ** 3 if VPS_BANDWIDTH_GB > 0 else 0
+    remaining = max(0, allowance - monthly) if allowance else 0
+    usage_pct = monthly / allowance * 100 if allowance else 0
+
+    return {
+        "rx": rx,
+        "tx": tx,
+        "monthly": monthly,
+        "rx_rate": max(0, rx - previous_rx) / elapsed,
+        "tx_rate": max(0, tx - previous_tx) / elapsed,
+        "allowance": allowance,
+        "remaining": remaining,
+        "usage_pct": usage_pct,
+        "month": month,
+    }
+
+
+def bandwidth_text() -> str:
+    b = _bandwidth_snapshot()
+    month = datetime.strptime(b["month"], "%Y-%m").strftime("%B %Y")
+    lines = [
+        "🌐 <b>Network & Bandwidth</b>",
+        "",
+        f"📅 Period: <b>{month}</b>",
+        f"⬇️ RX total: <b>{format_bytes(b['rx'])}</b>",
+        f"⬆️ TX total: <b>{format_bytes(b['tx'])}</b>",
+        f"📊 Interface total: <b>{format_bytes(b['rx'] + b['tx'])}</b>",
+        "",
+        "⚡ <b>Current speed</b>",
+        f"⬇️ RX: <b>{format_rate(b['rx_rate'])}</b>",
+        f"⬆️ TX: <b>{format_rate(b['tx_rate'])}</b>",
+        "",
+        f"📈 <b>This month (observed):</b> {format_bytes(b['monthly'])}",
+    ]
+    if b["allowance"]:
+        icon = "🔴" if b["usage_pct"] >= 90 else "🟡" if b["usage_pct"] >= 75 else "🟢"
+        lines += [
+            "",
+            f"{icon} <b>Allowance:</b> {format_bytes(b['allowance'])}",
+            f"📦 <b>Remaining:</b> {format_bytes(b['remaining'])}",
+            f"📊 <b>Used:</b> {b['usage_pct']:.1f}%",
+        ]
+    else:
+        lines += ["", "ℹ️ Set <code>VPS_BANDWIDTH_GB</code> to show remaining allowance."]
+    return "\n".join(lines)
+
+
 def vps_stats_text() -> str:
     try:
         cpu = psutil.cpu_percent(interval=0.35)
@@ -87,7 +193,7 @@ def vps_stats_text() -> str:
         memory = psutil.virtual_memory()
         swap = psutil.swap_memory()
         disk = psutil.disk_usage("/")
-        net = psutil.net_io_counters()
+        bandwidth = _bandwidth_snapshot()
         containers = docker_client.containers.list(all=True)
         running = sum(c.status == "running" for c in containers)
 
@@ -101,8 +207,11 @@ def vps_stats_text() -> str:
             f"{mem_icon} RAM: <b>{format_bytes(memory.used)}</b> / {format_bytes(memory.total)} ({memory.percent:.1f}%)\n"
             f"💾 Swap: <b>{format_bytes(swap.used)}</b> / {format_bytes(swap.total)} ({swap.percent:.1f}%)\n"
             f"{disk_icon} Disk: <b>{format_bytes(disk.used)}</b> / {format_bytes(disk.total)} ({disk.percent:.1f}%)\n"
-            f"⬇️ Network RX: {format_bytes(net.bytes_recv)}\n"
-            f"⬆️ Network TX: {format_bytes(net.bytes_sent)}\n"
+            "🌐 <b>Network</b>\n"
+            f"⬇️ RX: <b>{format_bytes(bandwidth['rx'])}</b> ({format_rate(bandwidth['rx_rate'])})\n"
+            f"⬆️ TX: <b>{format_bytes(bandwidth['tx'])}</b> ({format_rate(bandwidth['tx_rate'])})\n"
+            f"📊 Month: <b>{format_bytes(bandwidth['monthly'])}</b> observed\n"
+            + (f"📦 Remaining: <b>{format_bytes(bandwidth['remaining'])}</b> ({bandwidth['usage_pct']:.1f}% used)\n" if bandwidth["allowance"] else "")
             f"⏱️ Uptime: {format_uptime(time.time() - psutil.boot_time())}\n\n"
             f"🐳 Docker: <b>{running} running</b> / {len(containers)} total"
         )
@@ -463,6 +572,9 @@ def main_keyboard():
         InlineKeyboardButton("📊 All Status", callback_data="all_status"),
     ])
     buttons.append([
+        InlineKeyboardButton("🌐 Bandwidth", callback_data="bandwidth"),
+    ])
+    buttons.append([
         InlineKeyboardButton("➕ Add Container", callback_data="add_container_help"),
     ])
 
@@ -541,6 +653,7 @@ def help_text():
         "🐳 <b>Docker Controller Help</b>\n\n"
         "<b>VPS monitoring</b>\n"
         "/stats — CPU, RAM, swap, disk, network and uptime\n"
+        "/bandwidth — monthly bandwidth and live network speed\n"
         "/docker_stats — per-container CPU and RAM usage\n\n"
         "<b>Services</b>\n"
         "/start — open controller\n"
@@ -608,6 +721,20 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 Refresh", callback_data="vps_stats")],
             [InlineKeyboardButton("📈 Docker Stats", callback_data="docker_stats")],
+            [InlineKeyboardButton("⬅️ BACK", callback_data="home")],
+        ]),
+    )
+
+
+async def bandwidth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update):
+        return
+    await update.message.reply_text(
+        bandwidth_text(),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Refresh", callback_data="bandwidth")],
+            [InlineKeyboardButton("🖥️ VPS Stats", callback_data="vps_stats")],
             [InlineKeyboardButton("⬅️ BACK", callback_data="home")],
         ]),
     )
@@ -728,6 +855,7 @@ async def post_init(application: Application):
     await application.bot.set_my_commands([
         BotCommand("start", "Open Docker controller"),
         BotCommand("stats", "Show VPS CPU, RAM and disk"),
+        BotCommand("bandwidth", "Show bandwidth usage and speed"),
         BotCommand("docker_stats", "Show container CPU and RAM"),
         BotCommand("status", "Show Docker services"),
         BotCommand("containers", "List all Docker containers"),
@@ -774,6 +902,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬅️ BACK", callback_data="home")]
+            ]),
+        )
+        return
+
+    if data == "bandwidth":
+        await query.edit_message_text(
+            bandwidth_text(),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Refresh", callback_data="bandwidth")],
+                [InlineKeyboardButton("🖥️ VPS Stats", callback_data="vps_stats")],
+                [InlineKeyboardButton("⬅️ BACK", callback_data="home")],
             ]),
         )
         return
@@ -997,6 +1137,7 @@ def main():
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("bandwidth", bandwidth_command))
     application.add_handler(CommandHandler("docker_stats", docker_stats_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status_command))
