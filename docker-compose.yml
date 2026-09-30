@@ -8,7 +8,11 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_USER_ID: ${TELEGRAM_USER_ID}
       TERABOX_COMPOSE_FILE: /home/ubuntu/terabox-telegram-bot/vps/docker-compose.yml
+      # Change this to your provider's actual monthly bandwidth allowance.
+      VPS_BANDWIDTH_GB: ${VPS_BANDWIDTH_GB:-0}
+      BANDWIDTH_STATE_FILE: /data/bandwidth_state.json
 
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /home/ubuntu/terabox-telegram-bot:/home/ubuntu/terabox-telegram-bot
+      - ./data:/data
