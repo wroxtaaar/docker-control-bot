@@ -32,7 +32,7 @@ TERABOX_COMPOSE = os.getenv(
     "/home/ubuntu/terabox-telegram-bot/vps/docker-compose.yml",
 )
 
-VPS_BANDWIDTH_GB = float(os.getenv("VPS_BANDWIDTH_GB", "0") or 0)
+VPS_BANDWIDTH_GB = float(os.getenv("VPS_BANDWIDTH_GB", "10240") or 10240)
 BANDWIDTH_STATE_FILE = Path(os.getenv("BANDWIDTH_STATE_FILE", "/data/bandwidth_state.json"))
 
 docker_client = docker.from_env()
@@ -128,7 +128,7 @@ def _bandwidth_snapshot() -> dict:
         previous_tx = int(state.get("last_tx") or tx)
         previous_time = float(state.get("last_time") or now)
         monthly = int(state.get("monthly_bytes") or 0)
-        monthly += max(0, rx - previous_rx) + max(0, tx - previous_tx)
+        monthly += max(0, tx - previous_tx)
 
     _save_bandwidth_state({
         "month": month,
