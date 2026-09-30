@@ -10,6 +10,7 @@ import docker
 import psutil
 from html import escape
 
+from telegram.error import BadRequest
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -884,6 +885,16 @@ async def post_init(application: Application):
 # CALLBACKS
 # ============================================================
 
+async def safe_edit_message(query, *args, **kwargs):
+    """Edit a callback message without failing when Telegram reports no change."""
+    try:
+        return await query.edit_message_text(*args, **kwargs)
+    except BadRequest as error:
+        if "Message is not modified" in str(error):
+            return None
+        raise
+
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
 
@@ -895,7 +906,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "home":
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             home_text(),
             parse_mode="HTML",
             reply_markup=main_keyboard(),
@@ -903,7 +914,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "add_container_help":
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             "➕ <b>Add Docker Container</b>\n\n"
             "Use:\n"
             "<code>/container_create NAME IMAGE [PORT=HOST_PORT] [ENV=KEY=VALUE]</code>\n\n"
@@ -917,7 +928,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "bandwidth":
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             bandwidth_text(),
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
@@ -929,7 +940,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "vps_stats":
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             vps_stats_text(),
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
@@ -941,7 +952,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "docker_stats":
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             container_stats_text(),
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
@@ -959,7 +970,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{escape(service['name'])}: {service_status(key)}"
             )
 
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             "\n".join(lines),
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
@@ -970,7 +981,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "containers":
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             all_containers_text(),
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
@@ -985,7 +996,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if service_key not in SERVICES:
             return
 
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             service_text(service_key),
             parse_mode="HTML",
             reply_markup=service_keyboard(service_key),
@@ -1004,7 +1015,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         buttons.append([InlineKeyboardButton("⬅️ BACK", callback_data=f"service:{service_key}")])
 
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             f"🐳 <b>{escape(service['name'])} Containers</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(buttons),
@@ -1013,7 +1024,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("cstatus:"):
         name = data.split(":", 1)[1]
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             container_detail(name),
             parse_mode="HTML",
             reply_markup=generic_container_keyboard(name),
@@ -1022,7 +1033,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("cstart:"):
         name = data.split(":", 1)[1]
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             start_container(name),
             parse_mode="HTML",
             reply_markup=generic_container_keyboard(name),
@@ -1031,7 +1042,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("cstop:"):
         name = data.split(":", 1)[1]
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             stop_container(name),
             parse_mode="HTML",
             reply_markup=generic_container_keyboard(name),
@@ -1040,7 +1051,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("crestart:"):
         name = data.split(":", 1)[1]
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             restart_container(name),
             parse_mode="HTML",
             reply_markup=generic_container_keyboard(name),
@@ -1056,7 +1067,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as error:
             logs = f"Error: {error}"
 
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             f"📋 <b>{escape(name)} Logs</b>\n\n<pre>{escape(logs[-3500:])}</pre>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
@@ -1076,7 +1087,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     service = SERVICES[service_key]
 
     if action == "status":
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             service_text(service_key),
             parse_mode="HTML",
             reply_markup=service_keyboard(service_key),
@@ -1090,7 +1101,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "restart": "🔄 Restarting",
         }[action]
 
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             f"{action_label} <b>{escape(service['name'])}</b>...",
             parse_mode="HTML",
         )
@@ -1109,7 +1120,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + f"Status: {service_status(service_key)}"
         )
 
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             text,
             parse_mode="HTML",
             reply_markup=service_keyboard(service_key),
@@ -1123,7 +1134,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<pre>{escape(logs[-3500:])}</pre>"
         )
 
-        await query.edit_message_text(
+        await safe_edit_message(query, 
             text,
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
