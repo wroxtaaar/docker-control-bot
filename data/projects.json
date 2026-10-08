@@ -1,0 +1,24 @@
+{
+  "projects": {
+    "home": {
+      "name": "🏠 Home",
+      "directory": "/home/ubuntu/home"
+    },
+    "terabox": {
+      "name": "📦 TeraBox",
+      "directory": "/home/ubuntu/terabox-telegram-bot"
+    },
+    "finance": {
+      "name": "💰 Finance",
+      "directory": "/home/ubuntu/oracle-finance"
+    },
+    "referral": {
+      "name": "🔗 Referral",
+      "directory": "/home/ubuntu/referral"
+    },
+    "agentic-ai": {
+      "name": "🤖 Agentic AI",
+      "directory": "/home/ubuntu/Agentic-AI"
+    }
+  }
+}
