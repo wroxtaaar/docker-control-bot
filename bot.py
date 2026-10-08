@@ -941,14 +941,21 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
 
-    lines = ["📊 <b>Docker Services</b>", ""]
-    for key, service in SERVICES.items():
-        lines.append(
-            f"{escape(service['name'])}: {service_status(key)}"
-        )
+    projects = _load_projects()
+    if not projects:
+        text = "📦 <b>Projects</b>\\n\\nNo projects configured."
+    else:
+        lines = ["📊 <b>Project Status</b>", ""]
+        for key, project in projects.items():
+            code, output = _run_project(project, ["ps"], timeout=30)
+            state = "🟢 Running" if code == 0 and output and "running" in output.lower() else "⚫ Stopped"
+            if code != 0:
+                state = "⚠️ Error"
+            lines.append(f"{escape(str(project.get('name', key)))}: {state}")
+        text = "\\n".join(lines)
 
     await update.message.reply_text(
-        "\n".join(lines),
+        text,
         parse_mode="HTML",
         reply_markup=main_keyboard(),
     )
@@ -1099,8 +1106,8 @@ async def post_init(application: Application):
         BotCommand("stats", "Show VPS CPU, RAM and disk"),
         BotCommand("bandwidth", "Show bandwidth usage and speed"),
         BotCommand("docker_stats", "Show container CPU and RAM"),
-        BotCommand("status", "Show Docker services"),
-        BotCommand("projects", "List Compose projects"),
+        BotCommand("status", "Show project status"),
+        BotCommand("projects", "List managed projects"),
         BotCommand("help", "Show help"),
     ])
     print("✅ Telegram command menu configured.")
