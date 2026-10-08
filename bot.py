@@ -56,33 +56,70 @@ def _load_projects() -> dict:
     return {}
 
 
-def _project_compose_file(project: dict) -> tuple[Path | None, str | None]:
+def _project_compose_files(project: dict) -> tuple[list[Path], str | None]:
     directory = Path(str(project.get("directory") or "")).expanduser().resolve()
     if not directory.is_dir():
-        return None, f"Directory does not exist: {directory}"
+        return [], f"Directory does not exist: {directory}"
 
     configured = project.get("compose")
-    candidates = [configured] if configured else [
-        "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"
-    ]
+    if configured:
+        candidates = configured if isinstance(configured, list) else [configured]
+    else:
+        candidates = [
+            "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"
+        ]
+
+    files = []
     for candidate in candidates:
-        if not candidate:
-            continue
-        compose = Path(candidate)
+        compose = Path(str(candidate))
         if not compose.is_absolute():
             compose = directory / compose
         compose = compose.resolve()
         if compose.is_file() and (directory == compose.parent or directory in compose.parents):
-            return compose, None
-    return None, f"No Compose file found in {directory}"
+            files.append(compose)
+
+    if not files:
+        return [], f"No Compose file found in {directory}"
+    return files, None
 
 
 def _run_project(project: dict, args: list[str], timeout: int = 120) -> tuple[int, str]:
-    compose, error = _project_compose_file(project)
+    project_type = str(project.get("type", "compose")).lower()
+
+    if project_type == "container":
+        container = str(project.get("container") or "").strip()
+        if not container:
+            return 1, "Project has no container configured."
+        action = args[0] if args else ""
+        commands = {
+            "start": ["docker", "start", container],
+            "stop": ["docker", "stop", container],
+            "restart": ["docker", "restart", container],
+            "ps": ["docker", "inspect", "--format", "{{.Name}}\\t{{.State.Status}}", container],
+            "logs": ["docker", "logs", "--tail", "80", container],
+        }
+        command = commands.get(action)
+        if not command:
+            return 1, f"Action '{action}' is not supported for this project type."
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, env=os.environ.copy())
+            output = (result.stdout or "") + (result.stderr or "")
+            return result.returncode, output.strip() or "Command completed with no output."
+        except subprocess.TimeoutExpired:
+            return 124, "Command timed out."
+        except Exception as error:
+            return 1, str(error)
+
+    compose_files, error = _project_compose_files(project)
     if error:
         return 1, error
-    directory = compose.parent
-    command = ["docker", "compose", "-f", str(compose), *args]
+
+    directory = compose_files[0].parent
+    command = ["docker", "compose"]
+    for compose in compose_files:
+        command += ["-f", str(compose)]
+    command += args
+
     try:
         result = subprocess.run(
             command,
@@ -107,7 +144,7 @@ def project_status_text(key: str) -> str:
     project = projects.get(key)
     if not project:
         return "❌ Project not found."
-    code, output = _run_project(project, ["ps", "--format", "table {{.Name}}\\t{{.State}}"], timeout=30)
+    code, output = _run_project(project, ["ps"], timeout=30)
     name = project.get("name", key)
     if code != 0:
         return f"❌ <b>{escape(str(name))}</b>\\n\\n<pre>{escape(output[-3500:])}</pre>"
@@ -119,6 +156,10 @@ def project_action_text(key: str, action: str) -> str:
     project = projects.get(key)
     if not project:
         return "❌ Project not found."
+
+    if action in {"pull", "rebuild"} and str(project.get("type", "compose")).lower() == "container":
+        return f"ℹ️ <b>{escape(str(project.get('name', key)))}</b> does not support {escape(action)}."
+
     commands = {
         "start": ["up", "-d"],
         "stop": ["down"],
@@ -127,8 +168,11 @@ def project_action_text(key: str, action: str) -> str:
         "rebuild": ["up", "-d", "--build"],
     }
     args = commands.get(action)
+    if str(project.get("type", "compose")).lower() == "container":
+        args = [action] if action in {"start", "stop", "restart"} else None
     if not args:
         return "❌ Unsupported project action."
+
     timeout = 600 if action in {"pull", "rebuild"} else 180
     code, output = _run_project(project, args, timeout=timeout)
     icon = {"start": "🚀", "stop": "⏹️", "restart": "🔄", "pull": "⬇️", "rebuild": "🔨"}[action]
@@ -144,9 +188,10 @@ def project_logs_text(key: str) -> str:
     project = projects.get(key)
     if not project:
         return "❌ Project not found."
-    code, output = _run_project(project, ["logs", "--tail", "80", "--no-color"], timeout=60)
+    code, output = _run_project(project, ["logs"] if str(project.get("type", "compose")).lower() == "compose" else ["logs"], timeout=60)
     title = project.get("name", key)
     return f"📋 <b>{escape(str(title))} Logs</b>\\n\\n<pre>{escape(output[-3500:])}</pre>"
+
 
 # ============================================================
 # MANAGED SERVICES
@@ -674,36 +719,14 @@ def parse_create_args(args: list[str]):
 # ============================================================
 
 def main_keyboard():
-    buttons = [
-        [InlineKeyboardButton("📦 Projects", callback_data="projects")]
-    ]
-
-    buttons += [
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 Projects", callback_data="projects")],
         [
-            InlineKeyboardButton(
-                service["name"],
-                callback_data=f"service:{key}",
-            )
-        ]
-        for key, service in SERVICES.items()
-    ]
-
-    buttons.append([
-        InlineKeyboardButton("🖥️ VPS Stats", callback_data="vps_stats"),
-        InlineKeyboardButton("🐳 Containers", callback_data="containers"),
+            InlineKeyboardButton("🖥️ VPS Stats", callback_data="vps_stats"),
+            InlineKeyboardButton("📈 Docker Stats", callback_data="docker_stats"),
+        ],
+        [InlineKeyboardButton("🌐 Bandwidth", callback_data="bandwidth")],
     ])
-    buttons.append([
-        InlineKeyboardButton("📈 Docker Stats", callback_data="docker_stats"),
-        InlineKeyboardButton("📊 All Status", callback_data="all_status"),
-    ])
-    buttons.append([
-        InlineKeyboardButton("🌐 Bandwidth", callback_data="bandwidth"),
-    ])
-    buttons.append([
-        InlineKeyboardButton("➕ Add Container", callback_data="add_container_help"),
-    ])
-
-    return InlineKeyboardMarkup(buttons)
 
 
 def projects_keyboard():
@@ -717,7 +740,9 @@ def projects_keyboard():
 
 
 def project_keyboard(key: str):
-    return InlineKeyboardMarkup([
+    project = _load_projects().get(key, {})
+    is_compose = str(project.get("type", "compose")).lower() == "compose"
+    rows = [
         [
             InlineKeyboardButton("▶️ START", callback_data=f"paction:start:{key}"),
             InlineKeyboardButton("⏹️ STOP", callback_data=f"paction:stop:{key}"),
@@ -726,17 +751,41 @@ def project_keyboard(key: str):
             InlineKeyboardButton("🔄 RESTART", callback_data=f"paction:restart:{key}"),
             InlineKeyboardButton("📊 STATUS", callback_data=f"pstatus:{key}"),
         ],
-        [
-            InlineKeyboardButton("📋 LOGS", callback_data=f"plogs:{key}"),
-        ],
-        [
+        [InlineKeyboardButton("📋 LOGS", callback_data=f"plogs:{key}")],
+    ]
+    if is_compose:
+        rows.append([
             InlineKeyboardButton("⬇️ PULL", callback_data=f"paction:pull:{key}"),
             InlineKeyboardButton("🔨 REBUILD", callback_data=f"paction:rebuild:{key}"),
-        ],
-        [
-            InlineKeyboardButton("⬅️ PROJECTS", callback_data="projects"),
-        ],
-    ])
+        ])
+    rows.append([InlineKeyboardButton("⬅️ PROJECTS", callback_data="projects")])
+    return InlineKeyboardMarkup(rows)
+
+
+def project_text(key: str):
+    projects = _load_projects()
+    project = projects.get(key)
+    if not project:
+        return "❌ Project not found."
+    name = project.get("name", key)
+    directory = project.get("directory", "unknown")
+    project_type = str(project.get("type", "compose")).lower()
+    if project_type == "container":
+        target = project.get("container", "unknown")
+        return (
+            f"<b>{escape(str(name))}</b>\\n\\n"
+            f"📁 Directory: <code>{escape(str(directory))}</code>\\n"
+            f"🐳 Project type: <code>container-backed</code>\\n"
+            f"🎯 Project target: <code>{escape(str(target))}</code>\\n\\n"
+            "Choose an action:"
+        )
+    compose = project.get("compose", "auto-detect")
+    return (
+        f"<b>{escape(str(name))}</b>\\n\\n"
+        f"📁 Directory: <code>{escape(str(directory))}</code>\\n"
+        f"🐳 Compose: <code>{escape(str(compose))}</code>\\n\\n"
+        "Choose an action:"
+    )
 
 
 def project_text(key: str):
@@ -1052,13 +1101,6 @@ async def post_init(application: Application):
         BotCommand("docker_stats", "Show container CPU and RAM"),
         BotCommand("status", "Show Docker services"),
         BotCommand("projects", "List Compose projects"),
-        BotCommand("containers", "List all Docker containers"),
-        BotCommand("container", "Open one container"),
-        BotCommand("container_start", "Start a container"),
-        BotCommand("container_stop", "Stop a container"),
-        BotCommand("container_restart", "Restart a container"),
-        BotCommand("container_logs", "Show container logs"),
-        BotCommand("container_create", "Create a Docker container"),
         BotCommand("help", "Show help"),
     ])
     print("✅ Telegram command menu configured.")
@@ -1392,13 +1434,6 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("projects", projects_command))
-    application.add_handler(CommandHandler("containers", containers_command))
-    application.add_handler(CommandHandler("container", container_command))
-    application.add_handler(CommandHandler("container_start", container_start_command))
-    application.add_handler(CommandHandler("container_stop", container_stop_command))
-    application.add_handler(CommandHandler("container_restart", container_restart_command))
-    application.add_handler(CommandHandler("container_logs", container_logs_command))
-    application.add_handler(CommandHandler("container_create", container_create_command))
     application.add_handler(CallbackQueryHandler(callback_handler))
 
     application.run_polling()
