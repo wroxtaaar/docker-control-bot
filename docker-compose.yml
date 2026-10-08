@@ -11,8 +11,11 @@ services:
       # Change this to your provider's actual monthly bandwidth allowance.
       VPS_BANDWIDTH_GB: ${VPS_BANDWIDTH_GB:-10240}
       BANDWIDTH_STATE_FILE: /data/bandwidth_state.json
+      PROJECTS_FILE: /data/projects.json
 
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /home/ubuntu/terabox-telegram-bot:/home/ubuntu/terabox-telegram-bot
+      # Project directories are accessed by the Compose CLI inside the controller.
+      # Docker socket access already gives this bot host-level Docker control.
+      - /home/ubuntu:/home/ubuntu
       - ./data:/data
