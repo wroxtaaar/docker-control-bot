@@ -4,6 +4,7 @@ import textwrap
 import time
 import threading
 import json
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 import docker
@@ -35,8 +36,117 @@ TERABOX_COMPOSE = os.getenv(
 
 VPS_BANDWIDTH_GB = float(os.getenv("VPS_BANDWIDTH_GB", "10240") or 10240)
 BANDWIDTH_STATE_FILE = Path(os.getenv("BANDWIDTH_STATE_FILE", "/data/bandwidth_state.json"))
+PROJECTS_FILE = Path(os.getenv("PROJECTS_FILE", "/data/projects.json"))
 
 docker_client = docker.from_env()
+
+# ============================================================
+# MANAGED PROJECTS
+# ============================================================
+
+def _load_projects() -> dict:
+    try:
+        if PROJECTS_FILE.exists():
+            with PROJECTS_FILE.open("r", encoding="utf-8") as file:
+                data = json.load(file)
+                projects = data.get("projects", data) if isinstance(data, dict) else {}
+                return projects if isinstance(projects, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _project_compose_file(project: dict) -> tuple[Path | None, str | None]:
+    directory = Path(str(project.get("directory") or "")).expanduser().resolve()
+    if not directory.is_dir():
+        return None, f"Directory does not exist: {directory}"
+
+    configured = project.get("compose")
+    candidates = [configured] if configured else [
+        "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        compose = Path(candidate)
+        if not compose.is_absolute():
+            compose = directory / compose
+        compose = compose.resolve()
+        if compose.is_file() and (directory == compose.parent or directory in compose.parents):
+            return compose, None
+    return None, f"No Compose file found in {directory}"
+
+
+def _run_project(project: dict, args: list[str], timeout: int = 120) -> tuple[int, str]:
+    compose, error = _project_compose_file(project)
+    if error:
+        return 1, error
+    directory = compose.parent
+    command = ["docker", "compose", "-f", str(compose), *args]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(directory),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=os.environ.copy(),
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        return result.returncode, output.strip() or "Command completed with no output."
+    except subprocess.TimeoutExpired:
+        return 124, "Command timed out."
+    except FileNotFoundError:
+        return 127, "Docker Compose CLI is not available inside the controller container."
+    except Exception as error:
+        return 1, str(error)
+
+
+def project_status_text(key: str) -> str:
+    projects = _load_projects()
+    project = projects.get(key)
+    if not project:
+        return "❌ Project not found."
+    code, output = _run_project(project, ["ps", "--format", "table {{.Name}}\\t{{.State}}"], timeout=30)
+    name = project.get("name", key)
+    if code != 0:
+        return f"❌ <b>{escape(str(name))}</b>\\n\\n<pre>{escape(output[-3500:])}</pre>"
+    return f"📊 <b>{escape(str(name))}</b>\\n\\n<pre>{escape(output[-3500:])}</pre>"
+
+
+def project_action_text(key: str, action: str) -> str:
+    projects = _load_projects()
+    project = projects.get(key)
+    if not project:
+        return "❌ Project not found."
+    commands = {
+        "start": ["up", "-d"],
+        "stop": ["down"],
+        "restart": ["restart"],
+        "pull": ["pull"],
+        "rebuild": ["up", "-d", "--build"],
+    }
+    args = commands.get(action)
+    if not args:
+        return "❌ Unsupported project action."
+    timeout = 600 if action in {"pull", "rebuild"} else 180
+    code, output = _run_project(project, args, timeout=timeout)
+    icon = {"start": "🚀", "stop": "⏹️", "restart": "🔄", "pull": "⬇️", "rebuild": "🔨"}[action]
+    title = project.get("name", key)
+    prefix = f"{icon} <b>{escape(str(title))}</b> — {action.title()}\\n\\n"
+    if code != 0:
+        prefix = f"❌ <b>{escape(str(title))}</b> — {action.title()} failed\\n\\n"
+    return prefix + f"<pre>{escape(output[-3500:])}</pre>"
+
+
+def project_logs_text(key: str) -> str:
+    projects = _load_projects()
+    project = projects.get(key)
+    if not project:
+        return "❌ Project not found."
+    code, output = _run_project(project, ["logs", "--tail", "80", "--no-color"], timeout=60)
+    title = project.get("name", key)
+    return f"📋 <b>{escape(str(title))} Logs</b>\\n\\n<pre>{escape(output[-3500:])}</pre>"
 
 # ============================================================
 # MANAGED SERVICES
@@ -565,6 +675,10 @@ def parse_create_args(args: list[str]):
 
 def main_keyboard():
     buttons = [
+        [InlineKeyboardButton("📦 Projects", callback_data="projects")]
+    ]
+
+    buttons += [
         [
             InlineKeyboardButton(
                 service["name"],
@@ -590,6 +704,55 @@ def main_keyboard():
     ])
 
     return InlineKeyboardMarkup(buttons)
+
+
+def projects_keyboard():
+    projects = _load_projects()
+    buttons = [
+        [InlineKeyboardButton(str(project.get("name", key)), callback_data=f"project:{key}")]
+        for key, project in projects.items()
+    ]
+    buttons.append([InlineKeyboardButton("⬅️ BACK", callback_data="home")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def project_keyboard(key: str):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("▶️ START", callback_data=f"paction:start:{key}"),
+            InlineKeyboardButton("⏹️ STOP", callback_data=f"paction:stop:{key}"),
+        ],
+        [
+            InlineKeyboardButton("🔄 RESTART", callback_data=f"paction:restart:{key}"),
+            InlineKeyboardButton("📊 STATUS", callback_data=f"pstatus:{key}"),
+        ],
+        [
+            InlineKeyboardButton("📋 LOGS", callback_data=f"plogs:{key}"),
+        ],
+        [
+            InlineKeyboardButton("⬇️ PULL", callback_data=f"paction:pull:{key}"),
+            InlineKeyboardButton("🔨 REBUILD", callback_data=f"paction:rebuild:{key}"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ PROJECTS", callback_data="projects"),
+        ],
+    ])
+
+
+def project_text(key: str):
+    projects = _load_projects()
+    project = projects.get(key)
+    if not project:
+        return "❌ Project not found."
+    name = project.get("name", key)
+    directory = project.get("directory", "unknown")
+    compose = project.get("compose", "auto-detect")
+    return (
+        f"<b>{escape(str(name))}</b>\\n\\n"
+        f"📁 Directory: <code>{escape(str(directory))}</code>\\n"
+        f"🐳 Compose: <code>{escape(str(compose))}</code>\\n\\n"
+        "Choose an action:"
+    )
 
 
 def service_keyboard(service_key: str):
@@ -666,6 +829,8 @@ def help_text():
         "/stats — CPU, RAM, swap, disk, network and uptime\n"
         "/bandwidth — monthly bandwidth and live network speed\n"
         "/docker_stats — per-container CPU and RAM usage\n\n"
+        "<b>Projects</b>\n"
+        "/projects — list configured Compose projects\n\n"
         "<b>Services</b>\n"
         "/start — open controller\n"
         "/status — show services\n"
@@ -697,6 +862,23 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         home_text(),
         parse_mode="HTML",
         reply_markup=main_keyboard(),
+    )
+
+
+async def projects_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update):
+        return
+    projects = _load_projects()
+    if not projects:
+        await update.message.reply_text("📦 No projects configured.", parse_mode="HTML")
+        return
+    lines = ["📦 <b>Projects</b>", ""]
+    for key, project in projects.items():
+        lines.append(f"• <code>{escape(key)}</code> — {escape(str(project.get('name', key)))}")
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=projects_keyboard(),
     )
 
 
@@ -869,6 +1051,7 @@ async def post_init(application: Application):
         BotCommand("bandwidth", "Show bandwidth usage and speed"),
         BotCommand("docker_stats", "Show container CPU and RAM"),
         BotCommand("status", "Show Docker services"),
+        BotCommand("projects", "List Compose projects"),
         BotCommand("containers", "List all Docker containers"),
         BotCommand("container", "Open one container"),
         BotCommand("container_start", "Start a container"),
@@ -911,6 +1094,51 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_markup=main_keyboard(),
         )
+        return
+
+    if data == "projects":
+        await safe_edit_message(
+            query,
+            "📦 <b>Projects</b>\n\nSelect a Compose project:",
+            parse_mode="HTML",
+            reply_markup=projects_keyboard(),
+        )
+        return
+
+    if data.startswith("project:"):
+        key = data.split(":", 1)[1]
+        if key not in _load_projects():
+            return
+        await safe_edit_message(query, project_text(key), parse_mode="HTML", reply_markup=project_keyboard(key))
+        return
+
+    if data.startswith("pstatus:"):
+        key = data.split(":", 1)[1]
+        if key not in _load_projects():
+            return
+        await safe_edit_message(query, project_status_text(key), parse_mode="HTML", reply_markup=project_keyboard(key))
+        return
+
+    if data.startswith("plogs:"):
+        key = data.split(":", 1)[1]
+        if key not in _load_projects():
+            return
+        await safe_edit_message(
+            query, project_logs_text(key), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Refresh", callback_data=f"plogs:{key}")],
+                [InlineKeyboardButton("⬅️ BACK", callback_data=f"project:{key}")],
+            ]),
+        )
+        return
+
+    if data.startswith("paction:"):
+        _, action, key = data.split(":", 2)
+        if key not in _load_projects():
+            return
+        await safe_edit_message(query, f"⏳ Running <b>{escape(action)}</b>...", parse_mode="HTML")
+        result = project_action_text(key, action)
+        await safe_edit_message(query, result, parse_mode="HTML", reply_markup=project_keyboard(key))
         return
 
     if data == "add_container_help":
@@ -1163,6 +1391,7 @@ def main():
     application.add_handler(CommandHandler("docker_stats", docker_stats_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("projects", projects_command))
     application.add_handler(CommandHandler("containers", containers_command))
     application.add_handler(CommandHandler("container", container_command))
     application.add_handler(CommandHandler("container_start", container_start_command))
