@@ -1,18 +1,17 @@
 {
   "projects": {
     "home": {
-      "name": "🏠 Home",
+      "name": "🏠 Home / Torrent Studio",
       "type": "container",
       "container": "home"
     },
-    "terabox": {
-      "name": "📦 TeraBox",
-      "type": "compose",
-      "directory": "/home/ubuntu/terabox-telegram-bot",
-      "compose": "compose.yaml"
+    "mega-stream": {
+      "name": "📺 MEGA Stream",
+      "type": "container",
+      "container": "mega-stream"
     },
     "finance": {
-      "name": "💰 Finance",
+      "name": "💰 Finance Tracker (API + Sheets)",
       "type": "compose",
       "directory": "/home/ubuntu/FinanceSMSTracker-kotlin/oracle-finance",
       "compose": [
@@ -20,27 +19,31 @@
         "docker-compose.sheets.yml"
       ]
     },
-    "referral": {
-      "name": "🔗 Referral",
-      "type": "compose",
-      "directory": "/home/ubuntu/referral",
-      "compose": "docker-compose.yml"
-    },
     "agentic-ai": {
       "name": "🤖 Agentic AI",
       "type": "compose",
       "directory": "/home/ubuntu/Agentic-AI",
       "compose": "docker-compose.yml"
     },
-    "ai-agent": {
-      "name": "🧠 AI Agent",
+    "terabox-worker": {
+      "name": "📦 TeraBox VPS Worker",
       "type": "container",
-      "container": "ai-agent"
+      "container": "terabox-vps-worker"
     },
-    "torrentflix": {
-      "name": "🎬 Torrentflix",
+    "movie": {
+      "name": "🎬 Movie Search (Torrentflix)",
       "type": "container",
       "container": "torrentflix"
+    },
+    "telegram-torrent-bot": {
+      "name": "🤖 Telegram Torrent Bot",
+      "type": "container",
+      "container": "telegram-torrent-bot"
+    },
+    "qbittorrent": {
+      "name": "🌊 qBittorrent",
+      "type": "container",
+      "container": "torrent-qbittorrent"
     }
   }
 }
