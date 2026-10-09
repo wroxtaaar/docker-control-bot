@@ -157,8 +157,14 @@ def project_action_text(key: str, action: str) -> str:
     if not project:
         return "❌ Project not found."
 
+    title = escape(str(project.get("name", key)))
+    if action == "stop" and project.get("allow_stop") is False:
+        return f"🛡️ <b>{title}</b> is a shared dependency; stopping it is disabled here."
+    if action == "restart" and project.get("allow_restart") is False:
+        return f"🛡️ <b>{title}</b> is a shared dependency; restarting it is disabled here."
+
     if action in {"pull", "rebuild"} and str(project.get("type", "compose")).lower() == "container":
-        return f"ℹ️ <b>{escape(str(project.get('name', key)))}</b> does not support {escape(action)}."
+        return f"ℹ️ <b>{title}</b> does not support {escape(action)}."
 
     commands = {
         "start": ["up", "-d"],
@@ -742,15 +748,18 @@ def projects_keyboard():
 def project_keyboard(key: str):
     project = _load_projects().get(key, {})
     is_compose = str(project.get("type", "compose")).lower() == "compose"
+
+    controls = []
+    if project.get("allow_start", True):
+        controls.append(InlineKeyboardButton("▶️ START", callback_data=f"paction:start:{key}"))
+    if project.get("allow_stop", True):
+        controls.append(InlineKeyboardButton("⏹️ STOP", callback_data=f"paction:stop:{key}"))
+    if project.get("allow_restart", True):
+        controls.append(InlineKeyboardButton("🔄 RESTART", callback_data=f"paction:restart:{key}"))
+    controls.append(InlineKeyboardButton("📊 STATUS", callback_data=f"pstatus:{key}"))
+
     rows = [
-        [
-            InlineKeyboardButton("▶️ START", callback_data=f"paction:start:{key}"),
-            InlineKeyboardButton("⏹️ STOP", callback_data=f"paction:stop:{key}"),
-        ],
-        [
-            InlineKeyboardButton("🔄 RESTART", callback_data=f"paction:restart:{key}"),
-            InlineKeyboardButton("📊 STATUS", callback_data=f"pstatus:{key}"),
-        ],
+        controls,
         [InlineKeyboardButton("📋 LOGS", callback_data=f"plogs:{key}")],
     ]
     if is_compose:
