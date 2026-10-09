@@ -39,18 +39,6 @@
       "name": "🤖 Telegram Torrent Bot",
       "type": "container",
       "container": "telegram-torrent-bot"
-    },
-    "qbittorrent": {
-      "name": "🌊 qBittorrent",
-      "type": "container",
-      "container": "torrent-qbittorrent"
-    },
-    "flaresolverr": {
-      "name": "🧩 FlareSolverr (shared by Home + Movie)",
-      "type": "container",
-      "container": "flaresolverr",
-      "allow_stop": false,
-      "allow_restart": false
     }
   }
 }
