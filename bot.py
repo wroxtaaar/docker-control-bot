@@ -1,4 +1,5 @@
 import os
+import asyncio
 import shlex
 import textwrap
 import time
@@ -357,6 +358,89 @@ def bandwidth_text() -> str:
     return "\n".join(lines)
 
 
+def host_disk_usage():
+    """Read the host filesystem through the existing /home/ubuntu bind mount."""
+    path = "/home/ubuntu" if os.path.isdir("/home/ubuntu") else "/"
+    return psutil.disk_usage(path), path
+
+
+def run_host_disk_cleaner_text() -> str:
+    """Run the fixed host cleaner in a temporary, isolated helper container.
+
+    The controller already has Docker-socket access. The helper receives a
+    read-write bind of the host root only for this fixed cleaner command; it
+    has no network and is removed after completion.
+    """
+    disk_before, disk_path = host_disk_usage()
+    helper = None
+    exit_code = 1
+    logs = ""
+
+    try:
+        controller_name = os.getenv("CONTROLLER_CONTAINER_NAME", "docker-control-bot")
+        controller = docker_client.containers.get(controller_name)
+        image_id = controller.image.id
+
+        helper = docker_client.containers.run(
+            image=image_id,
+            command=[
+                "/usr/sbin/chroot",
+                "/host",
+                "/usr/local/sbin/vps-disk-cleaner",
+                "--force",
+            ],
+            volumes={"/": {"bind": "/host", "mode": "rw"}},
+            detach=True,
+            network_disabled=True,
+            pid_mode="host",
+            working_dir="/",
+            mem_limit="512m",
+            labels={"purpose": "vps-disk-cleaner"},
+        )
+
+        result = helper.wait(timeout=900)
+        exit_code = int(result.get("StatusCode", 1))
+        logs = helper.logs(
+            stdout=True, stderr=True, tail=100
+        ).decode("utf-8", errors="replace")
+    except Exception as error:
+        logs = (logs + "\n" if logs else "") + f"ERROR: {error}"
+        exit_code = 1
+    finally:
+        if helper is not None:
+            try:
+                helper.reload()
+                if helper.status == "running":
+                    helper.stop(timeout=5)
+            except Exception:
+                pass
+            try:
+                helper.remove(force=True)
+            except Exception:
+                pass
+
+    disk_after, _ = host_disk_usage()
+    saved = disk_before.used - disk_after.used
+    if saved >= 0:
+        change_text = f"{format_bytes(saved)} less used"
+    else:
+        change_text = f"{format_bytes(-saved)} more used during cleanup"
+
+    state = "✅ Completed" if exit_code == 0 else "⚠️ Finished with errors"
+    output = (
+        f"🧹 <b>Manual VPS Disk Cleanup</b> — {state}\n\n"
+        f"<b>Before:</b> {format_bytes(disk_before.used)} used · "
+        f"{format_bytes(disk_before.free)} available · "
+        f"{format_bytes(disk_before.total)} total ({disk_before.percent:.1f}%)\n"
+        f"<b>After:</b> {format_bytes(disk_after.used)} used · "
+        f"{format_bytes(disk_after.free)} available · "
+        f"{format_bytes(disk_after.total)} total ({disk_after.percent:.1f}%)\n"
+        f"<b>Net change:</b> {change_text}\n\n"
+        f"<pre>{escape(logs[-2500:] or 'Cleaner returned no output.')}</pre>"
+    )
+    return output
+
+
 def vps_stats_text() -> str:
     try:
         cpu = psutil.cpu_percent(interval=0.35)
@@ -364,7 +448,7 @@ def vps_stats_text() -> str:
         load = psutil.getloadavg() if hasattr(psutil, "getloadavg") else (0, 0, 0)
         memory = psutil.virtual_memory()
         swap = psutil.swap_memory()
-        disk = psutil.disk_usage("/")
+        disk, disk_path = host_disk_usage()
         bandwidth = _bandwidth_snapshot()
         containers = docker_client.containers.list(all=True)
         running = sum(c.status == "running" for c in containers)
@@ -378,7 +462,9 @@ def vps_stats_text() -> str:
             f"📈 Load: <code>{load[0]:.2f} / {load[1]:.2f} / {load[2]:.2f}</code>\n"
             f"{mem_icon} RAM: <b>{format_bytes(memory.used)}</b> / {format_bytes(memory.total)} ({memory.percent:.1f}%)\n"
             f"💾 Swap: <b>{format_bytes(swap.used)}</b> / {format_bytes(swap.total)} ({swap.percent:.1f}%)\n"
-            f"{disk_icon} Disk: <b>{format_bytes(disk.used)}</b> / {format_bytes(disk.total)} ({disk.percent:.1f}%)\n"
+            f"{disk_icon} VPS Disk: <b>{format_bytes(disk.used)} used</b> / "
+            f"<b>{format_bytes(disk.free)} available</b> of {format_bytes(disk.total)} "
+            f"({disk.percent:.1f}%)\\n"
             "🌐 <b>Network</b>\n"
             f"⬇️ RX: <b>{format_bytes(bandwidth['rx'])}</b> ({format_rate(bandwidth['rx_rate'])})\n"
             f"⬆️ TX: <b>{format_bytes(bandwidth['tx'])}</b> ({format_rate(bandwidth['tx_rate'])})\n"
@@ -732,6 +818,7 @@ def main_keyboard():
             InlineKeyboardButton("📈 Docker Stats", callback_data="docker_stats"),
         ],
         [InlineKeyboardButton("🌐 Bandwidth", callback_data="bandwidth")],
+        [InlineKeyboardButton("🧹 Clean Disk Now", callback_data="disk_clean_confirm")],
     ])
 
 
@@ -979,6 +1066,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 Refresh", callback_data="vps_stats")],
             [InlineKeyboardButton("📈 Docker Stats", callback_data="docker_stats")],
+            [InlineKeyboardButton("🧹 Clean Disk Now", callback_data="disk_clean_confirm")],
             [InlineKeyboardButton("⬅️ BACK", callback_data="home")],
         ]),
     )
@@ -1151,6 +1239,40 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             home_text(),
             parse_mode="HTML",
             reply_markup=main_keyboard(),
+        )
+        return
+
+    if data == "disk_clean_confirm":
+        await safe_edit_message(
+            query,
+            "🧹 <b>Run immediate disk cleanup?</b>\\n\\n"
+            "This will run the VPS cleaner with <code>--force</code>, even below the 40% threshold. "
+            "It cleans the APT cache, archived journal logs older than 30 days, and eligible "
+            "Docker build cache older than 7 days. It does not remove project files, images, "
+            "containers, or volumes.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Run Cleanup Now", callback_data="disk_clean_run")],
+                [InlineKeyboardButton("✖️ Cancel", callback_data="home")],
+            ]),
+        )
+        return
+
+    if data == "disk_clean_run":
+        await safe_edit_message(
+            query,
+            "⏳ <b>Running VPS disk cleanup…</b>\\nThis may take a few minutes.",
+            parse_mode="HTML",
+        )
+        result = await asyncio.to_thread(run_host_disk_cleaner_text)
+        await safe_edit_message(
+            query,
+            result,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Refresh VPS Stats", callback_data="vps_stats")],
+                [InlineKeyboardButton("⬅️ MAIN MENU", callback_data="home")],
+            ]),
         )
         return
 
