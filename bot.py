@@ -1354,6 +1354,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Refresh", callback_data="vps_stats")],
                 [InlineKeyboardButton("📈 Docker Stats", callback_data="docker_stats")],
+                [InlineKeyboardButton("🧹 Clean Disk Now", callback_data="disk_clean_confirm")],
                 [InlineKeyboardButton("⬅️ BACK", callback_data="home")],
             ]),
         )
