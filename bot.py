@@ -371,7 +371,7 @@ def run_host_disk_cleaner_text() -> str:
     read-write bind of the host root only for this fixed cleaner command; it
     has no network and is removed after completion.
     """
-    disk_before, disk_path = host_disk_usage()
+    disk_before, _ = host_disk_usage()
     helper = None
     exit_code = 1
     logs = ""
@@ -448,7 +448,7 @@ def vps_stats_text() -> str:
         load = psutil.getloadavg() if hasattr(psutil, "getloadavg") else (0, 0, 0)
         memory = psutil.virtual_memory()
         swap = psutil.swap_memory()
-        disk, disk_path = host_disk_usage()
+        disk, _ = host_disk_usage()
         bandwidth = _bandwidth_snapshot()
         containers = docker_client.containers.list(all=True)
         running = sum(c.status == "running" for c in containers)
@@ -464,7 +464,7 @@ def vps_stats_text() -> str:
             f"💾 Swap: <b>{format_bytes(swap.used)}</b> / {format_bytes(swap.total)} ({swap.percent:.1f}%)\n"
             f"{disk_icon} VPS Disk: <b>{format_bytes(disk.used)} used</b> / "
             f"<b>{format_bytes(disk.free)} available</b> of {format_bytes(disk.total)} "
-            f"({disk.percent:.1f}%)\\n"
+            f"({disk.percent:.1f}%)\n"
             "🌐 <b>Network</b>\n"
             f"⬇️ RX: <b>{format_bytes(bandwidth['rx'])}</b> ({format_rate(bandwidth['rx_rate'])})\n"
             f"⬆️ TX: <b>{format_bytes(bandwidth['tx'])}</b> ({format_rate(bandwidth['tx_rate'])})\n"
@@ -1245,7 +1245,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "disk_clean_confirm":
         await safe_edit_message(
             query,
-            "🧹 <b>Run immediate disk cleanup?</b>\\n\\n"
+            "🧹 <b>Run immediate disk cleanup?</b>\n\n"
             "This will run the VPS cleaner with <code>--force</code>, even below the 40% threshold. "
             "It cleans the APT cache, archived journal logs older than 30 days, and eligible "
             "Docker build cache older than 7 days. It does not remove project files, images, "
@@ -1261,7 +1261,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "disk_clean_run":
         await safe_edit_message(
             query,
-            "⏳ <b>Running VPS disk cleanup…</b>\\nThis may take a few minutes.",
+            "⏳ <b>Running VPS disk cleanup…</b>\nThis may take a few minutes.",
             parse_mode="HTML",
         )
         result = await asyncio.to_thread(run_host_disk_cleaner_text)
